@@ -83,4 +83,90 @@ class TransformerBlock(nn.Module):
         x = x + self.drop(self.mlp(self.norm2(x)))
         return x, attn_weights
 
+class ViTTiny(nn.Module):
+    """
+    ViT-Tiny: 5.7M parameters, works on 4GB VRAM.
+    embed_dim = 192, depth = 12, heads = 3
+    """
+
+    def __init__(self, img_size  = 64, 
+                patch_size       = 8, 
+                embed_dim        = 192, 
+                depth            = 6, 
+                num_heads        = 3):
+
+        super().__init__()
+        self.patch_embed = PatchEmbed(img_size, patch_size, 3, embed_dim)
+        num_patches = self.patch_embed.num_patches
+
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim))
+
+        self.blocks = nn.ModuleList([
+          TransformerBlock(embed_dim, num_heads) for _ in range(depth)  
+        ])
+
+        self.norm = nn.LayerNorm(embed_dim)
+        self.__init__weights()
+
+    def _init__weights(self):
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+        nn.init.trunc_normal_(self.cls_token, std=0.02)
+
+    def forward(self, x, return_attn=False):
+        B   = x.shape[0]
+        x   = self.patch_embed(x)
+        cls = self.cls_token.expand(B, -1, -1)
+        x   = torch.cat([cls, x], dim=1) + self.pos_embed
         
+        all_attn = []
+        for block in self.blocks:
+            x, attn = block(x)
+            all_attn.append(attn)
+            
+        x = self.norm(x)
+        cls_out = x[:, 0] # CLS token embedding
+
+        if return_attn:
+            return cls_out, all_attn # for visualization
+        return cls_out
+
+# Projection Head
+class ProjectionHead(nn.Module):
+    """
+    v1  : linear probing
+    v2+ : 3-layer with bottleneck (like original DINO paper) 
+    """
+        
+    def __init__(
+        self, 
+        in_dim,
+        hidden_dim = 512,
+        out_dim    = 128,
+        use_mlp    = False
+    ):
+        super().__init__()
+        if use_mlp:
+            self.proj = nn.Sequential(
+                nn.Linear(in_dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, out_dim)
+            )
+        else:
+            self.proj = nn.Linear(in_dim, out_dim)
+
+        # L2 normalize output (critical for DINO)
+        self.last_layer = nn.utils.weight_norm(
+            nn.Linear(out_dim, out_dim, bias=False)
+        )
+        self.last_layer.weight_g.data.fill_(1)
+
+    def forward(self, x):
+        x = self.proj(x)
+        x = F.normalize(x, dim=-1, p=2)
+        x = self.last_layer(x)
+        return x
+
+# Full DINO network + Backbone + Head
