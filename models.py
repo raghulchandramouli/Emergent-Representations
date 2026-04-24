@@ -170,3 +170,18 @@ class ProjectionHead(nn.Module):
         return x
 
 # Full DINO network + Backbone + Head
+class DINONetwork(nn.Module):
+    def __init__(self, backbone, proj_head):
+        super().__init__()
+        self.backbone = backbone
+        self.head     = proj_head
+
+    def forward(self, x, return_attn=False):
+        if return_attn and hasattr(self.backbone, 'forward'):
+            try:
+                feat, attn = self.backbone(x, return_attn = True)
+                return self.head(feat), attn
+            except TypeError:
+                pass
+        feat = self.backbone(x)
+        return self.head(feat)
