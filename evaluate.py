@@ -45,3 +45,25 @@ def extract_embeddings(model, loader, device):
     return (np.concatenate(all_feats, axis=0),
             np.concatenate(all_labels, axis=0))
 
+def knn_eval(train_feats, train_labels, test_feats, test_labels, k = 5):
+    """
+    knn evaluation
+
+    Args:
+        train_feats: Training embeddings
+        train_labels: Training labels
+        test_feats: Test embeddings
+        test_labels: Test labels
+        k: Number of neighbors
+
+    Returns:
+        Accuracy score
+    """
+    # Normalize features
+    knn = KNeighborsClassifier(n_neighbors = k, metric='cosine')
+    knn.fit(train_feats, train_labels)
+    preds = knn.predict(test_feats)
+    acc = accuracy_score(test_labels, preds)
+    print(f" KNN (k={k}) Accuracy: {acc*100:.2f}%")
+    return acc
+
