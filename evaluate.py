@@ -67,3 +67,26 @@ def knn_eval(train_feats, train_labels, test_feats, test_labels, k = 5):
     print(f" KNN (k={k}) Accuracy: {acc*100:.2f}%")
     return acc
 
+def linear_probe(train_feats, train_labels, test_feats, test_labels):
+    """
+    linear probing
+    
+    Args:
+        train_feats: Training embeddings
+        train_labels: Training labels
+        test_feats: Test embeddings
+        test_labels: Test labels
+    
+    Returns:
+        Accuracy score
+    """
+    scaler = StandardScaler()
+    X_train = scaler.fit_transform(train_feats)
+    X_test = scaler.transform(test_feats)
+    
+    clf = LogisticRegression(max_iter = 1000, c = 1.0)
+    clf.fit(X_train, train_labels)
+    preds = clf.predict(X_test)
+    acc = accuracy_score(test_labels, preds)
+    print(f" Linear Probing Accuracy: {acc*100:.2f}%")
+    return acc
