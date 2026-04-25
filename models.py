@@ -1,3 +1,12 @@
+"""
+This file contains the model architecture for DINO.
+Includes: 
+- TinyCNN (Lightweight CNN)
+- ViTTiny (ViT-Tiny)
+- Projection Head (3-layer bottleneck)
+- DINO Network (Backbone + Head)
+"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
