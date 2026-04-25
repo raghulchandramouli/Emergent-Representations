@@ -90,3 +90,15 @@ def linear_probe(train_feats, train_labels, test_feats, test_labels):
     acc = accuracy_score(test_labels, preds)
     print(f" Linear Probing Accuracy: {acc*100:.2f}%")
     return acc
+
+def run_eval(student, train_loader, test_loader, device):
+    print("Extract Embedding")
+
+    train_feats, train_labels = extract_embeddings(student, train_loader, device)
+    test_feats, test_labels   = extract_embeddings(student, test_loader, device)
+
+    knn_eval(train_feats, train_labels, test_feats, test_labels, k = 5)
+    linear_probe(train_feats, train_labels, test_feats, test_labels)
+
+    return train_feats, test_feats, train_labels, test_labels
+    
