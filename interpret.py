@@ -9,6 +9,7 @@ Usage:
     5. summary dashboard - single call to plot it all
 """
 
+from IPython.core.pylabtools import figsize
 import torch
 import torch
 import numpy as np
@@ -204,4 +205,131 @@ class AttentionAnalyzer:
         """
 
         all_attn = self._get_all_attn(img_tensor)
-        return LRP_ViT.rollout(all_attn).numpy()
+        return LRPExplainer.rollout(all_attn).numpy()
+
+# Attention Tracking - Per-Layer Evolution
+
+class AttentionTracker:
+    """
+    Track how attn patterns evolve across transformer depth.
+
+    Useful for understanding:
+        - Which layer attend locally vs globally
+        - At what depth semantic features emerge
+        - Head specialization patters
+    """
+    
+    def __init__(self, model, device='cpu'):
+        self.analyzer = AttentionAnalyzer(model, device)
+        self.model    = model
+        self.device   = device
+        self.img_size = None
+
+    @torch.no_grad()
+    def track(self, img_tensor, img_size=64, patch_size=8):
+        """
+        Compute per-layer attention maps for all heads
+
+        Returns: dict with keys:
+            `per_layer_maps` : list of (n_heads, H, W) spatial maps
+            `entropy`        : (n_layers, n_heads)
+            `variance`       : (n_layers, n_heads)
+            `rollout`        : (num_patches,)
+        """  
+
+        self.img_size   = img_size
+        self.patch_size = patch_size
+
+        all_attn = self.analyzer._get_all_attn(img_tensor)
+        n_layers = len(all_attn) 
+        n_heads  = all_attn[0].shape[1] # 6 
+
+        per_layer_maps = []
+        for layer_idx, attn in enumerate(all_attn):
+
+            head_maps = []
+            for h in range(n_heads):
+                cls_attn = attn[0, h, 0, 1:].cpu() # (N,)
+                spatial  = to_spatial(cls_attn, img_size, patch_size)
+                spatial  = (spatial - spatial.min()) / (spatial.max() - spatial.min() + 1e-6)
+                head_maps.append(spatial)
+
+            per_layer_maps.append(head_maps) # [n_layer][n_heads] -> (H, W)
+
+            rollout_flat = LRPExplainer._attention_rollout(all_attn).numpy()
+            rollout_map  = to_spatial(torch.tensor(rollout_flat), img_size, patch_size)
+
+            return {
+                "per_layer_maps" : per_layer_maps,
+                "entropy"        : self.analyzer.attention_entropy(img_tensor),
+                "variance"       : self.analyzer.head_variance(img_tensor),
+                "rollout"        : rollout_map
+            }
+
+    def plot_layer_evolution(self,
+                            img_tensor,
+                            img_size=64,
+                            patch_size=8,
+                            heads_to_show=(0,1,2),
+                            save="attn_tracking.png"):
+
+        """
+
+        Grid plot: selected heads, cols = transformer layers.
+        shows how each head's attn changes with depth.
+        """
+
+        data      = self.track(img_tensor, img_size, patch_size)
+        per_layer = data['per_layer_maps']
+        n_layer   = len(per_layer)
+        img_np    = denormalize(img_tensor)
+        n_heads_show = len(heads_to_show)
+
+        fig, axes = plt.subplots(
+            n_heads_show, n_layer + 1,
+            figsize=(2.5 * (n_layer + 1), 2.5 * n_heads_show)
+        ) 
+
+        if n_heads_show == 1:
+            axes = axes[np.newaxis, :] 
+        
+        for row, h in enumerate(heads_to_show):
+            # Show input image
+            axes[row, 0].imshow(img_np) 
+            axes[row, 0].set_title(f"Head {h}\n(input)", fontsize=7)
+            axes[row, 0].axis('off')
+
+            for col, layer_idx in enumerate(range(n_layer)):
+                # Show attention heatmap for this head at this layer
+                attn_map = per_layer[layer_idx][h]
+                overlay_heatmap(axes[row, col + 1], img_np, attn_map,
+                                title=f"L{layer_idx}", alpha=0.6, cmap='inferno')
+
+        plt.suptitle("Attention Evolution Across Transformer Depth", fontsize=11, y = 1.01)
+        plt.tight_layout()
+        plt.savefig(save, dpi=150, bbox_inches='tight')
+        plt.show()
+        print(f"saved {save}")
+        return data
+    
+    def plot_entropy_heatmap(self,
+                            img_tensor,
+                            save = "entropy_heatmap.png"):
+        """
+        Heatmap of attention entropy across layers for each head.
+        Low entropy = focused; High = diffuse.
+        """
+
+        entropy = self.analyzer.attention_entropy(img_tensor)
+
+        fig, ax = plt.subplots(figsize=(max(6, entropy.shape[0]), 3))
+        im      = ax.imshow(entropy.T, aspect='auto', cmap = "YlOrRd")
+        ax.set_xlabel("Transfomer Layer")
+        ax.set_ylabel("Attention Head")
+        ax.set_xticks(range(entropy.shape[0]))
+        ax.set_yticks(range(entropy.shape[1]))
+        plt.colorbar(im, ax=ax, label="Entropy (nats)")
+        plt.tight_layout()
+        plt.savefig(save, dpi=150)
+        plt.show()
+        print(f"saved {save}")
