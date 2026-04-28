@@ -122,4 +122,86 @@ class LRPExplainer:
         cls_rollout = rollout[0, 1:] # exclude CLS token itself
         return cls_rollout.detach().cpu()
 
-        
+# Attnetion Score analysis
+class AttentionAnalyzer:
+    """
+    Full attention score analysis for ViT-Tiny (v3).
+
+    Methods:
+        raw_attention()     -> per-head attention maps.
+        head_variance()     -> which heads are specialized
+        attention_entropy() -> how focused is each head?
+        rollout()           -> attention rollout for each head
+    """
+    def __init__(self, model, device = 'cpu'):
+        self.model  = model.eval()
+        self.device = device
+
+    @torch.no_grad()
+    def _get_all_attn(self, img_tensor):
+        """
+        Forward a batch of images and return all attention maps.
+
+        input: tensor of shape (B, 3, H, W)
+        output: all_attn (num_layers, B, num_heads, N+1, N+1)
+        """
+
+        img_tensor = img_tensor.to(self.device)
+        _, all_attn = self.model.backbone(img_tensor, return_attn = True)
+        return all_attn # list of (1, num_heads, N+1, N+1)
+
+    def raw_attention(self, img_tensor, layer_idx=-1):
+        """
+        Raw CLS -> patch attention for each head at a given layer.
+        Returns: (num_heads, num_patches) numpy array.
+        """
+
+        all_attn = self._get_all_attn(img_tensor)
+        attn     = all_attn[layer_idx][0]     # (H, N + 1, N + 1)
+        cls_attn = attn[0, 1:].cpu().numpy()  # (N+1,) -> (N,)
+        return cls_attn
+
+    def head_variance(self, img_tensor):
+        """
+        Variance of CLS -> patch attention across patches per head per layer
+        High Variance = head is focused / specilized
+        Low  Variance = head is diffuse / attends uniformely.
+
+        Returns: (n_layer, n_heads) numpy array
+        """
+
+        all_attn = self._get_all_attn(img_tensor)
+        variance = []
+
+        for attn in all_attn:
+            a = attn[0: :, 0, 1:].cpu().numpy() # (n_heads, N)
+            variance.append(a.var(axis=-1))     # (n_heads,)
+        return np.stack(variance)               # (n_layers, n_heads)
+
+    def attention_entropy(self, img_tensor):
+        """
+        Shannon entropy of CLS -> patch attention per head per layer
+
+        Low entropy  = focused attention (interpretable)
+        High entropy = diffuse attention (uniform)
+
+        Returns: (n_layer, n_heads)
+        """
+
+        all_attn = self._get_all_attn(img_tensor)
+        entropies = []
+
+        for attn in all_attn:
+            a   = attn[0, :, 0, 1:]                     # (n_heads, N)
+            a   = a / (a.sum(-1, keepdim=True) + 1e-8)  # normalize
+            ent = -(a * (a + 1e-8).log()).sum(-1)       # entropy for each head
+            entropies.append(ent.cpu().numpy())
+        return np.stack(entropies) 
+
+    def rollout(self, img_tensor):
+        """
+        Attention rollout across all layer -> (num_patches,).
+        """
+
+        all_attn = self._get_all_attn(img_tensor)
+        return LRP_ViT.rollout(all_attn).numpy()
