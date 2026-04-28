@@ -333,3 +333,63 @@ class AttentionTracker:
         plt.savefig(save, dpi=150)
         plt.show()
         print(f"saved {save}")
+
+# GradCAM (CNN backbone - v1/v2)
+
+class GradCAM:
+    """
+    Gradient-weighted Class Activation Map for CNN.
+    Works on any Conv2D layer. 
+
+    Viz: which spatial region most activates the repr?
+    """
+
+    def __init__(self, model, target_layer_name = None, device = 'cpu'):
+        self.model  = model.eval()
+        self.device = device 
+        self._feat  = None
+        self._grad  = None 
+
+        # Auto-select last conv layer
+        self.target_layer = self._find_layer(target_layer_name)
+        self._register()
+
+    def _find_layer(self, name = None):
+        last_conv = None
+        for n, m in self.model.backbone.named_modules():
+            if isinstance(m, nn.Conv2d):
+                last_conv = m
+        return last_conv
+
+    def _register(self):
+        def fwd(module, inp, out):
+            self._feat = out
+
+        def bwd(module, grad_in, grad_out):
+            self._grad = grad_out[0]
+
+        self.target_layer.register_forward_hook(fwd)
+        self.target_layer.register_full_backward_hook(bwd)
+
+    def explain(self, img_tensor):
+        """
+        Returns (H, W) GradCAM heatmap.
+        """
+
+        img = img_tensor.to(self.device).requires_grad_(True)
+        out = self.model.backbone(img) # (1, embed_dim)
+
+        self.model.zero_grad()
+        out.sum().backward()
+
+        # Weight feature maps by global-averaged gradient
+        weights = self._grad.mean(dim=[2, 3], keepdim=True)   # (1, C, 1, 1)
+        cam     = (weights * self._feat).sum(dim=1, keepdim=True)  # (1, 1, h, w)
+        cam     = F.relu(cam)
+        # Upsample to input size
+        H = img_tensor.shape[-1]
+        cam = F.interpolate(cam, size=(H, H),
+                            mode="bilinear", align_corners=False)
+        cam = cam[0, 0].detach().cpu().numpy()
+        cam = (cam - cam.min()) / (cam.max() - cam.min() + 1e-8)
+        return cam      
