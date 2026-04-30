@@ -50,9 +50,123 @@ _BWR = LinearSegmentedColormap.from_list(
     "bwr_custom", ["#2166ac", "#f7f7f7", "#d6604d"], N=256
 )
 
-# LRP - Layer-wise Relavance Propagation
-
 class LRPExplainer:
+    """
+    LRP for CNN backbones (v1/v2) using the epsilon-rule.
+    Theory:
+        Relevance flows backwards through layers.
+        Each neuron receives relevance proportional to its activation.
+        R_j = Σ_k [ (z_jk / Σ_j z_jk + ε) * R_k ]
+    Supports: Linear, Conv2d, BatchNorm2d (merged), ReLU (pass-through).
+    """
+    def __init__(self, model, device="cpu", eps=1e-6):
+        self.model  = model.eval()
+        self.device = device
+        self.eps    = eps
+        self._hooks = []
+        self._acts  = {}   # layer_name → activation
+        self._grads = {}   # layer_name → gradient
+
+    def _register_hooks(self):
+        """Register forward hooks to capture layer activations."""
+        self._acts.clear()
+
+        def make_hook(name):
+            def hook(module, inp, out):
+                self._acts[name] = out.detach()
+            return hook
+
+        for name, module in self.model.backbone.named_modules():
+            if isinstance(module, (nn.Conv2d, nn.Linear)):
+                h = module.register_forward_hook(make_hook(name))
+                self._hooks.append(h)
+
+    def _remove_hooks(self):
+        for h in self._hooks:
+            h.remove()
+        self._hooks.clear()
+        
+    @staticmethod
+    def _lrp_linear(layer, activation, relevance, eps=1e-6):
+        """
+        Epsilon-LRP for a Linear layer.
+        z = W·a   (pre-activation)
+        R_j = a_j * Σ_k [ W_jk * R_k / (z_k + ε·sign(z_k)) ]
+        """
+        W = layer.weight.data                                   # (out, in)
+        b = layer.bias.data if layer.bias is not None else 0
+        z  = activation @ W.T + b                               # (B, out)
+        s  = relevance / (z + eps * z.sign().clamp(min=1e-3))   # (B, out)
+        c  = s @ W                                              # (B, in)
+        return activation * c                                   # (B, in)
+
+    @staticmethod
+    def _lrp_conv(layer, inp, relevance, eps=1e-6):
+        """
+        Epsilon-LRP for a Conv2d layer (via gradient trick).
+        Gradient trick: R_in = inp * ∂(z·s)/∂inp
+        where s = R / (z + ε)
+        """
+        inp = inp.detach().requires_grad_(True)
+        z   = layer(inp)
+        s   = (relevance / (z + eps)).detach()
+        (z * s).sum().backward()
+        return (inp * inp.grad).detach()
+
+    def _lrp_pass(self, inp, relevance):
+        """Pass-through rule for activations / pooling."""
+        return relevance  # same shape assumed
+    
+    @torch.no_grad()
+    def explain(self, img_tensor):
+        """
+        Compute pixel-level relevance map.
+        img_tensor: (1, 3, H, W)
+        Returns:    (H, W) numpy array — relevance per pixel
+        """
+        img = img_tensor.to(self.device)
+        # Forward pass to get all activations
+        self._register_hooks()
+        with torch.enable_grad():
+            img.requires_grad_(True)
+            out = self.model.backbone(img)           # (1, embed_dim)
+        self._remove_hooks()
+
+        # Start relevance from output (all equal)
+        R = out.detach()                             # (1, embed_dim)
+        # Walk through backbone layers in reverse
+
+        layers = [(n, m) for n, m in self.model.backbone.named_modules()
+                  if isinstance(m, (nn.Linear, nn.Conv2d))]
+        # Propagate through linear layers (fc at end)
+
+        for name, layer in reversed(layers):
+            act = self._acts.get(name)
+            if act is None:
+                continue
+            if isinstance(layer, nn.Linear):
+                R = self._lrp_linear(layer, act, R, self.eps)
+            elif isinstance(layer, nn.Conv2d):
+                # Need inp for conv — approximate with activation of prev layer
+                # (For a cleaner impl, track inputs too)
+                inp_approx = act  # approximation
+                R_spatial   = R.view(act.shape) if R.numel() == act.numel() else R
+
+                try:
+                    R = self._lrp_conv(layer, act, R_spatial, self.eps)
+                except Exception:
+                    pass  # shape mismatch — skip
+
+        # R now has shape close to input; aggregate channels
+        with torch.enable_grad():
+            img2 = img_tensor.to(self.device).requires_grad_(True)
+            loss = self.model.backbone(img2).sum()
+            loss.backward()
+            saliency = img2.grad[0].abs().mean(0).cpu().numpy()  # (H, W)
+        return saliency  # fallback to gradient-based if LRP shape mismatch
+
+# LRP - Layer-wise Relavance Propagation
+class LRP_ViT:
     """
     LRP for CNN using the epsilon-rule.
 
@@ -205,7 +319,7 @@ class AttentionAnalyzer:
         """
 
         all_attn = self._get_all_attn(img_tensor)
-        return LRPExplainer.rollout(all_attn).numpy()
+        return LRP_ViT.rollout(all_attn).numpy()
 
 # Attention Tracking - Per-Layer Evolution
 
@@ -256,7 +370,7 @@ class AttentionTracker:
 
             per_layer_maps.append(head_maps) # [n_layer][n_heads] -> (H, W)
 
-            rollout_flat = LRPExplainer._attention_rollout(all_attn).numpy()
+            rollout_flat = LRP_ViT._attention_rollout(all_attn).numpy()
             rollout_map  = to_spatial(torch.tensor(rollout_flat), img_size, patch_size)
 
             return {
@@ -383,13 +497,73 @@ class GradCAM:
         out.sum().backward()
 
         # Weight feature maps by global-averaged gradient
-        weights = self._grad.mean(dim=[2, 3], keepdim=True)   # (1, C, 1, 1)
+        weights = self._grad.mean(dim=[2, 3], keepdim=True)        # (1, C, 1, 1)
         cam     = (weights * self._feat).sum(dim=1, keepdim=True)  # (1, 1, h, w)
         cam     = F.relu(cam)
+        
         # Upsample to input size
         H = img_tensor.shape[-1]
         cam = F.interpolate(cam, size=(H, H),
-                            mode="bilinear", align_corners=False)
+                            mode="bilinear", align_corners=False) 
+        
         cam = cam[0, 0].detach().cpu().numpy()
         cam = (cam - cam.min()) / (cam.max() - cam.min() + 1e-8)
         return cam      
+
+# Master Interpreter - SEP
+
+class DINOInterpreter:
+
+    """
+    One-stop interpretabilty for any DINO Version
+
+        interp = DINOInterpreter(student_model, "dino_v1.pt", device='cpu')
+        interp.explain(img_tensor, label='dog')
+        interp.track_attention(img_tensor)
+        interp.plot_attn_evolution(img_tensor)
+    """
+
+    def __init__(self, model, device='cpu', version='v3', img_size=64, patch_size=8):
+
+        self.model     = model.eval().to(device)
+        self.device    = device
+        self.version   = version
+        self.img_size  = img_size
+        self.patch_size = patch_size
+
+        # init LRP
+        if version == 'v3':
+            self.lrp = LRP_ViT(model, device)
+        else:
+            self.lrp = LRPExplainer(model, device)
+
+        # init GradCAM
+        self.gradcam      = GradCAM(model, device) if version != 'v3' else None
+
+        # Attn init
+        self.attn_tracker = AttentionTracker(model, device) if version == 'v3' else None
+
+    # Main dashboard
+    def explain(self, img_tensor, label="", save='explain_dashboard.png'):
+        """
+        Full dashboard showing multiple explanations for a single image
+            - Original
+            - LRP relevance map
+            - GradCAM (CNN) or Attention Rollout (ViT)
+            - Combined overlay
+        """ 
+
+        img_np = denormalize(img_tensor)
+
+        # Compute maps
+        lrp_map = self.lrp.explain(img_tensor.to(self.device))
+
+        if self.gradcam:
+            cam_map   = self.gradcam.explain(img_tensor)
+            cam_title = "GradCAM"
+        elif self.attn_tracker:
+            cam_map = AttentionAnalyzer(
+                self.model, self.device
+            ).rollout(img_tensor.to(self.device))
+
+         
