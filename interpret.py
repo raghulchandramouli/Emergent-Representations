@@ -566,4 +566,75 @@ class DINOInterpreter:
                 self.model, self.device
             ).rollout(img_tensor.to(self.device))
 
-         
+            cam_map = to_spatial(torch.tensor(cam_map),
+                                 self.img_size,
+                                 self.patch_size) 
+
+            cam_title = "Attention Rollout"
+
+        else:
+            cam_map   = lrp_map
+            cam_title = "LRP"
+
+        # Norm maps
+        def norm(m):
+            return (m-m.min()) / (m.max() - m.min() + 1e-8) 
+        
+        lrp_map = norm(lrp_map)
+        cam_map = norm(cam_map)
+
+        combined = norm(0.5 * lrp_map + 0.5 * cam_map)
+
+        # plot 
+        fig, axes = plt.subplots(1, 4, figsize = (14, 3.5))
+        fig.suptitle(f"DINO {self.version} Interpretability - {label}",
+                     fontsize = 12, fontweight = "bold")
+
+        axes[0].imshow(img_np)
+        axes[0].set_title("Original", fontsize = 10)
+        axes[0].axis('off')
+
+        overlay_heatmap(axes[1], img_np, lrp_map, title="LRP Relevance", cmap=_BWR)
+        overlay_heatmap(axes[2], img_np, cam_map, title=cam_title, cmap="jet")
+        overlay_heatmap(axes[3], img_np, combined, title="LRP + Rollout (combined)", cmap="hot")
+
+        plt.tight_layout()
+        plt.savefig(save, dpi=150, bbox_inches = 'tight')
+        plt.show()
+        print(f"saved {save}")
+
+        return {"LRP" : lrp_map, 
+                "CAM" : cam_map,
+                "combined" : combined,
+        }
+
+        # Attention Tracking
+
+        def tracking_attention(
+            self, img_tensor, heads_to_show=(0, 1, 2)
+        ):
+
+            """
+            Plot attention evolution for specific heads
+            """
+            if self.attn_tracker is None:
+                return 
+
+            self.attn_tracker.plot_layer_evolution(
+                img_tensor.to(self.device),
+                img_size = self.img_size,
+                patch_size = self.patch_size,
+                heads_to_show = heads_to_show,
+            )
+
+        def entropy_analysis(self, img_tensor):
+            """
+            Entropy heatmap + across layer x heads
+            """
+
+            if self.attn_tracker is None:
+                return
+            
+            self.attn_tracker.plot_entropy_heatmap(
+                img
+            )
