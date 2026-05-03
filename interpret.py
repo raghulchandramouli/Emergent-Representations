@@ -511,7 +511,6 @@ class GradCAM:
         return cam      
 
 # Master Interpreter - SEP
-
 class DINOInterpreter:
 
     """
@@ -636,5 +635,71 @@ class DINOInterpreter:
                 return
             
             self.attn_tracker.plot_entropy_heatmap(
-                img
+                img_tensor.to(self.device)
             )
+
+        # Batch analysis
+        def explain_batch(self,
+                          image_tensor: list,
+                          labels      : list,
+                          max_images  = 6,
+                          save        = "batch_explain.png"):
+        
+            """
+            Explain multiple images on a grid
+            image_tensor : list of tensors (1,3,H,W)
+            """
+
+            n = min(len(image_tensor), max_images)
+            fig, axes = plt.subplots(
+                n, 3, figsize=(9, 3 * n)
+            )
+
+            if n == 1:
+                axes = axes[np.newaxis, :]
+
+            for i in range(n):
+                img_np  = denormalize(image_tensor[i])
+                lrp_map = self.lrp.explain(image_tensor[i].to(self.device))
+                lrp_map = (lrp_map - lrp_map.min()) / (lrp_map.max() - lrp_map.min() + 1e-8)
+
+                if self.gradcam:
+                    ext_map   = self.gradcam.explain(image_tensor[i])
+                    ext_title = "GradCAM"
+                elif self.attn_tracker:
+                    rollout   = AttentionAnalyzer(self.model, self.device)\
+                                .rollout(img_tensor[i].to(self.device))
+ 
+                    ext_map   = to_spatial(torch.tensor(rollout),
+                                           self.img_size,
+                                           self.patch_size)
+
+                    ext_title = "Rollout"
+
+                else:
+                    ext_map   = lrp_map
+                    ext_title = "LRP"
+                
+                ext_map = (ext_map - ext_map.min()) / (ext_map.max() - ext_map.min() + 1e-8)
+
+                axes[i, 0].imshow(img_np)
+                axes[i, 0].set_ylabel(labels[i], fontsize = 9, rotation=0,
+                                      labelpad = 50, va='center')
+                
+                axes[i, 0].axis('off')
+
+                overlay_heatmap(axes[i, 1], img_np, lrp_map, "LRP", cmap=_BWR)
+                overlay_heatmap(axes[i, 2], img_np, ext_map, ext_title, cmap="jet")
+            
+            axes[0, 0].set_title("Input", fontsize = 9)
+            axes[0, 1].set_title("LRP", fontsize = 9)
+            axes[0, 2].set_title(ext_title, fontsize = 9)
+
+            plt.suptitle(f"DINO {self.version} - Batch Analysis", fontsize = 11)
+            plt.tight_layout()
+            plt.savefig(save, dpi=150, bbox_inches = 'tight')
+            plt.show()
+
+            print(f"saved {save}")
+
+                
