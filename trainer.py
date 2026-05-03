@@ -9,7 +9,7 @@ It contains:
 """
 
 from copy import copy
-import torch, copy
+import torch
 import torch.nn as nn
 from torch.cuda.amp import GradScaler, autocast
 
@@ -146,7 +146,7 @@ def train_dino(
     optimizer = torch.optim.AdamW(student.parameters(),
                                  lr = lr,
                                  weight_decay = 0.04)
-    scheluler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, 
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, 
                                                             T_max = epochs)
     scaler    = GradScaler()
 
@@ -165,7 +165,7 @@ def train_dino(
             teacher_momentum = teacher_momentum
         )
 
-        scheluler.step()
+        scheduler.step()
         history.append(loss)
 
         if (epoch + 1) % 10 == 0:

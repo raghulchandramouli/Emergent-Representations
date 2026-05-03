@@ -9,8 +9,6 @@ Usage:
     5. summary dashboard - single call to plot it all
 """
 
-from IPython.core.pylabtools import figsize
-import torch
 import torch
 import numpy as np
 import torch.nn as nn
@@ -289,7 +287,7 @@ class AttentionAnalyzer:
         variance = []
 
         for attn in all_attn:
-            a = attn[0: :, 0, 1:].cpu().numpy() # (n_heads, N)
+            a = attn[0, :, 0, 1:].cpu().numpy() # (n_heads, N)
             variance.append(a.var(axis=-1))     # (n_heads,)
         return np.stack(variance)               # (n_layers, n_heads)
 
@@ -319,7 +317,7 @@ class AttentionAnalyzer:
         """
 
         all_attn = self._get_all_attn(img_tensor)
-        return LRP_ViT.rollout(all_attn).numpy()
+        return LRP_ViT._attention_rollout(all_attn).numpy()
 
 # Attention Tracking - Per-Layer Evolution
 
@@ -370,15 +368,15 @@ class AttentionTracker:
 
             per_layer_maps.append(head_maps) # [n_layer][n_heads] -> (H, W)
 
-            rollout_flat = LRP_ViT._attention_rollout(all_attn).numpy()
-            rollout_map  = to_spatial(torch.tensor(rollout_flat), img_size, patch_size)
+        rollout_flat = LRP_ViT._attention_rollout(all_attn).numpy()
+        rollout_map  = to_spatial(torch.tensor(rollout_flat), img_size, patch_size)
 
-            return {
-                "per_layer_maps" : per_layer_maps,
-                "entropy"        : self.analyzer.attention_entropy(img_tensor),
-                "variance"       : self.analyzer.head_variance(img_tensor),
-                "rollout"        : rollout_map
-            }
+        return {
+            "per_layer_maps" : per_layer_maps,
+            "entropy"        : self.analyzer.attention_entropy(img_tensor),
+            "variance"       : self.analyzer.head_variance(img_tensor),
+            "rollout"        : rollout_map
+        }
 
     def plot_layer_evolution(self,
                             img_tensor,
@@ -609,76 +607,76 @@ class DINOInterpreter:
 
         # Attention Tracking
 
-        def tracking_attention(
-            self, img_tensor, heads_to_show=(0, 1, 2)
+    def tracking_attention(
+        self, img_tensor, heads_to_show=(0, 1, 2)
         ):
 
-            """
-            Plot attention evolution for specific heads
-            """
-            if self.attn_tracker is None:
-                return 
+        """
+        Plot attention evolution for specific heads
+        """
+        if self.attn_tracker is None:
+            return 
 
-            self.attn_tracker.plot_layer_evolution(
-                img_tensor.to(self.device),
-                img_size = self.img_size,
-                patch_size = self.patch_size,
-                heads_to_show = heads_to_show,
-            )
+        self.attn_tracker.plot_layer_evolution(
+            img_tensor.to(self.device),
+            img_size = self.img_size,
+            patch_size = self.patch_size,
+            heads_to_show = heads_to_show,
+        )
 
-        def entropy_analysis(self, img_tensor):
-            """
-            Entropy heatmap + across layer x heads
-            """
+    def entropy_analysis(self, img_tensor):
+        """
+        Entropy heatmap + across layer x heads
+        """
 
-            if self.attn_tracker is None:
-                return
+        if self.attn_tracker is None:
+            return
             
-            self.attn_tracker.plot_entropy_heatmap(
-                img_tensor.to(self.device)
-            )
+        self.attn_tracker.plot_entropy_heatmap(
+            img_tensor.to(self.device)
+        )
 
-        # Batch analysis
-        def explain_batch(self,
-                          image_tensor: list,
-                          labels      : list,
-                          max_images  = 6,
-                          save        = "batch_explain.png"):
+    # Batch analysis
+    def explain_batch(self,
+                      image_tensor: list,
+                      labels      : list,
+                      max_images  = 6,
+                      save        = "batch_explain.png"):
         
-            """
-            Explain multiple images on a grid
-            image_tensor : list of tensors (1,3,H,W)
-            """
+        """
+        Explain multiple images on a grid
+        image_tensor : list of tensors (1,3,H,W)
+        """
 
-            n = min(len(image_tensor), max_images)
-            fig, axes = plt.subplots(
-                n, 3, figsize=(9, 3 * n)
-            )
+        n = min(len(image_tensor), max_images)
+        fig, axes = plt.subplots(
+            n, 3, figsize=(9, 3 * n)
+        )
 
-            if n == 1:
-                axes = axes[np.newaxis, :]
+        if n == 1:
+            axes = axes[np.newaxis, :]
 
-            for i in range(n):
-                img_np  = denormalize(image_tensor[i])
-                lrp_map = self.lrp.explain(image_tensor[i].to(self.device))
-                lrp_map = (lrp_map - lrp_map.min()) / (lrp_map.max() - lrp_map.min() + 1e-8)
+        for i in range(n):
+            img_np  = denormalize(image_tensor[i])
+            lrp_map = self.lrp.explain(image_tensor[i].to(self.device))
+            lrp_map = (lrp_map - lrp_map.min()) / (lrp_map.max() - lrp_map.min() + 1e-8)
 
-                if self.gradcam:
-                    ext_map   = self.gradcam.explain(image_tensor[i])
-                    ext_title = "GradCAM"
-                elif self.attn_tracker:
-                    rollout   = AttentionAnalyzer(self.model, self.device)\
-                                .rollout(img_tensor[i].to(self.device))
+            if self.gradcam:
+                ext_map   = self.gradcam.explain(image_tensor[i])
+                ext_title = "GradCAM"
+            elif self.attn_tracker:
+                rollout   = AttentionAnalyzer(self.model, self.device)\
+                            .rollout(image_tensor[i].to(self.device))
  
-                    ext_map   = to_spatial(torch.tensor(rollout),
-                                           self.img_size,
-                                           self.patch_size)
+                ext_map   = to_spatial(torch.tensor(rollout),
+                                       self.img_size,
+                                       self.patch_size)
 
-                    ext_title = "Rollout"
+                ext_title = "Rollout"
 
-                else:
-                    ext_map   = lrp_map
-                    ext_title = "LRP"
+            else:
+                ext_map   = lrp_map
+                ext_title = "LRP"
                 
                 ext_map = (ext_map - ext_map.min()) / (ext_map.max() - ext_map.min() + 1e-8)
 
@@ -695,11 +693,11 @@ class DINOInterpreter:
             axes[0, 1].set_title("LRP", fontsize = 9)
             axes[0, 2].set_title(ext_title, fontsize = 9)
 
-            plt.suptitle(f"DINO {self.version} - Batch Analysis", fontsize = 11)
-            plt.tight_layout()
-            plt.savefig(save, dpi=150, bbox_inches = 'tight')
-            plt.show()
+        plt.suptitle(f"DINO {self.version} - Batch Analysis", fontsize = 11)
+        plt.tight_layout()
+        plt.savefig(save, dpi=150, bbox_inches = 'tight')
+        plt.show()
 
-            print(f"saved {save}")
+        print(f"saved {save}")
 
                 

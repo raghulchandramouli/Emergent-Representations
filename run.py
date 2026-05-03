@@ -9,7 +9,7 @@ from torchvision.datasets import CIFAR10
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
-from torchvision.transforms as T
+import torchvision.transforms as T
 
 from augmentations import DINOAugmentations
 from trainer import train_dino
@@ -125,7 +125,7 @@ student, teacher, history = train_dino(
     version    = VERSION,
     dataloader = train_loader,
     epochs     = EPOCHS,
-    student_lr = LR,
+    lr         = LR,
     device     = DEVICE,
     save_path  = f"dino_{VERSION}.pt"
 )

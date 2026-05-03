@@ -7,7 +7,6 @@ This Includes:
 3. Att_maps  - Extract from ViTs. only for DINOv3 
 """
 
-from IPython.core.pylabtools import figsize
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
@@ -67,7 +66,7 @@ def get_attention_maps(vit_model, img_tensor, head_idx=0, layer_idx=-1):
     """ 
 
     vit_model.eval()
-    _, all_attn = vit_model.get_all_attns(img_tensor, return_attn = True)
+    _, all_attn = vit_model.backbone(img_tensor, return_attn = True)
 
     # Pick last transformer layer attention
     attn = all_attn[layer_idx]

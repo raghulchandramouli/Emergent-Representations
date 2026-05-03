@@ -84,7 +84,7 @@ def linear_probe(train_feats, train_labels, test_feats, test_labels):
     X_train = scaler.fit_transform(train_feats)
     X_test = scaler.transform(test_feats)
     
-    clf = LogisticRegression(max_iter = 1000, c = 1.0)
+    clf = LogisticRegression(max_iter = 1000, C = 1.0)
     clf.fit(X_train, train_labels)
     preds = clf.predict(X_test)
     acc = accuracy_score(test_labels, preds)
