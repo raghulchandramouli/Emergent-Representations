@@ -8,10 +8,11 @@ It contains:
 - train_dino
 """
 
-from copy import copy
+import copy
 import torch
 import torch.nn as nn
 from torch.cuda.amp import GradScaler, autocast
+from tqdm.auto import tqdm
 
 from models import TinyCNN, ViTTiny, ProjectionHead, DINONetwork
 from loss import DINOLoss
@@ -87,7 +88,9 @@ def train_one_epoch(
     total_loss = 0.0
     optimizer.zero_grad()
 
-    for step, (views, _) in enumerate(loader):
+    progress = tqdm(loader, desc="Training batches", leave=False)
+
+    for step, (views, _) in enumerate(progress):
 
         # views::list of (B, C, H, W) tensor
         views = [v.to(device) for v in views]
@@ -112,7 +115,7 @@ def train_one_epoch(
 
             # Gradients clip (prevents explosions)
             scaler.unscale_(optimizer)
-            nn.utils.clip_grad_norm_(student.parameters(), max_morm=3.0)
+            nn.utils.clip_grad_norm_(student.parameters(), max_norm=3.0)
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad()
@@ -125,6 +128,7 @@ def train_one_epoch(
             )
 
         total_loss += loss.item() * accum_steps
+        progress.set_postfix(loss=f"{total_loss / (step + 1):.4f}")
 
     return total_loss / len(loader)
 
@@ -152,7 +156,9 @@ def train_dino(
 
     history   = []
 
-    for epoch in range(epochs):
+    epoch_progress = tqdm(range(epochs), desc=f"DINO {version} epochs")
+
+    for epoch in epoch_progress:
 
         loss = train_one_epoch(
             student,
@@ -167,6 +173,7 @@ def train_dino(
 
         scheduler.step()
         history.append(loss)
+        epoch_progress.set_postfix(loss=f"{loss:.4f}", lr=f"{scheduler.get_last_lr()[0]:.2e}")
 
         if (epoch + 1) % 10 == 0:
             print(f"[Epoch {epoch+1:3d}/{epochs}] Loss: {loss:.4f}")

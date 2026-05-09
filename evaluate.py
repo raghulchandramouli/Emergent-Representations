@@ -13,9 +13,10 @@ from sklearn.metrics import accuracy_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.linear_model import LogisticRegression
+from tqdm.auto import tqdm
 
 @torch.no_grad()
-def extract_embeddings(model, loader, device):
+def extract_embeddings(model, loader, device, desc="Extract embeddings"):
     """
     Extract (embedding, label) pairs for a model over a loader
 
@@ -32,7 +33,7 @@ def extract_embeddings(model, loader, device):
     model.eval()
     all_feats, all_labels = [], []
 
-    for imgs, labels in loader:
+    for imgs, labels in tqdm(loader, desc=desc, leave=False):
         imgs = imgs.to(device)
 
         # Use backbone only (not projection head)
@@ -94,11 +95,14 @@ def linear_probe(train_feats, train_labels, test_feats, test_labels):
 def run_eval(student, train_loader, test_loader, device):
     print("Extract Embedding")
 
-    train_feats, train_labels = extract_embeddings(student, train_loader, device)
-    test_feats, test_labels   = extract_embeddings(student, test_loader, device)
+    train_feats, train_labels = extract_embeddings(
+        student, train_loader, device, desc="Train embeddings"
+    )
+    test_feats, test_labels   = extract_embeddings(
+        student, test_loader, device, desc="Test embeddings"
+    )
 
     knn_eval(train_feats, train_labels, test_feats, test_labels, k = 5)
     linear_probe(train_feats, train_labels, test_feats, test_labels)
 
     return train_feats, test_feats, train_labels, test_labels
-    

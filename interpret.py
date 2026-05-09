@@ -17,6 +17,12 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from matplotlib.colors import LinearSegmentedColormap
 from copy import deepcopy
+from tqdm.auto import tqdm
+
+CIFAR_CLASSES = [
+    "airplane", "automobile", "bird", "cat", "deer",
+    "dog", "frog", "horse", "ship", "truck",
+]
 
 # Helpers
 def denormalize(img_tensor):
@@ -221,7 +227,12 @@ class LRP_ViT:
         """
 
         # each attn: (1, num_heads, N+1, N+1)
-        rollout = torch.eye(all_attn[0].shape[-1])
+        first_attn = all_attn[0]
+        rollout = torch.eye(
+            first_attn.shape[-1],
+            device=first_attn.device,
+            dtype=first_attn.dtype,
+        )
 
         for attn in all_attn:
             # Average over heads
@@ -535,7 +546,7 @@ class DINOInterpreter:
             self.lrp = LRPExplainer(model, device)
 
         # init GradCAM
-        self.gradcam      = GradCAM(model, device) if version != 'v3' else None
+        self.gradcam      = GradCAM(model, device=device) if version != 'v3' else None
 
         # Attn init
         self.attn_tracker = AttentionTracker(model, device) if version == 'v3' else None
@@ -608,7 +619,7 @@ class DINOInterpreter:
         # Attention Tracking
 
     def tracking_attention(
-        self, img_tensor, heads_to_show=(0, 1, 2)
+        self, img_tensor, heads_to_show=(0, 1, 2), save=None
         ):
 
         """
@@ -622,9 +633,10 @@ class DINOInterpreter:
             img_size = self.img_size,
             patch_size = self.patch_size,
             heads_to_show = heads_to_show,
+            save = save or f"attn_tracking_{self.version}.png",
         )
 
-    def entropy_analysis(self, img_tensor):
+    def entropy_analysis(self, img_tensor, save=None):
         """
         Entropy heatmap + across layer x heads
         """
@@ -633,7 +645,8 @@ class DINOInterpreter:
             return
             
         self.attn_tracker.plot_entropy_heatmap(
-            img_tensor.to(self.device)
+            img_tensor.to(self.device),
+            save = save or f"entropy_heatmap_{self.version}.png",
         )
 
     # Batch analysis
@@ -656,7 +669,7 @@ class DINOInterpreter:
         if n == 1:
             axes = axes[np.newaxis, :]
 
-        for i in range(n):
+        for i in tqdm(range(n), desc="Interpreting batch", leave=False):
             img_np  = denormalize(image_tensor[i])
             lrp_map = self.lrp.explain(image_tensor[i].to(self.device))
             lrp_map = (lrp_map - lrp_map.min()) / (lrp_map.max() - lrp_map.min() + 1e-8)
@@ -678,20 +691,20 @@ class DINOInterpreter:
                 ext_map   = lrp_map
                 ext_title = "LRP"
                 
-                ext_map = (ext_map - ext_map.min()) / (ext_map.max() - ext_map.min() + 1e-8)
+            ext_map = (ext_map - ext_map.min()) / (ext_map.max() - ext_map.min() + 1e-8)
 
-                axes[i, 0].imshow(img_np)
-                axes[i, 0].set_ylabel(labels[i], fontsize = 9, rotation=0,
-                                      labelpad = 50, va='center')
-                
-                axes[i, 0].axis('off')
+            axes[i, 0].imshow(img_np)
+            axes[i, 0].set_ylabel(labels[i], fontsize = 9, rotation=0,
+                                  labelpad = 50, va='center')
 
-                overlay_heatmap(axes[i, 1], img_np, lrp_map, "LRP", cmap=_BWR)
-                overlay_heatmap(axes[i, 2], img_np, ext_map, ext_title, cmap="jet")
+            axes[i, 0].axis('off')
+
+            overlay_heatmap(axes[i, 1], img_np, lrp_map, "LRP", cmap=_BWR)
+            overlay_heatmap(axes[i, 2], img_np, ext_map, ext_title, cmap="jet")
             
-            axes[0, 0].set_title("Input", fontsize = 9)
-            axes[0, 1].set_title("LRP", fontsize = 9)
-            axes[0, 2].set_title(ext_title, fontsize = 9)
+        axes[0, 0].set_title("Input", fontsize = 9)
+        axes[0, 1].set_title("LRP", fontsize = 9)
+        axes[0, 2].set_title(ext_title, fontsize = 9)
 
         plt.suptitle(f"DINO {self.version} - Batch Analysis", fontsize = 11)
         plt.tight_layout()
@@ -700,4 +713,100 @@ class DINOInterpreter:
 
         print(f"saved {save}")
 
-                
+def _load_student_from_checkpoint(checkpoint_path, version, device, img_size):
+    from trainer import build_dino
+
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint_version = checkpoint.get("version") if isinstance(checkpoint, dict) else None
+    version = version or checkpoint_version or "v1"
+
+    student, _, _ = build_dino(version=version, image_size=img_size)
+    state_dict = checkpoint.get("student", checkpoint) if isinstance(checkpoint, dict) else checkpoint
+    student.load_state_dict(state_dict)
+    return student.eval().to(device), version
+
+def _load_cifar_samples(data_root, img_size, num_samples, download):
+    import torchvision.transforms as T
+
+    transform = T.Compose([
+        T.Resize((img_size, img_size)),
+        T.ToTensor(),
+        T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+    ])
+
+    try:
+        from torchvision.datasets import CIFAR10
+
+        dataset = CIFAR10(
+            root=data_root,
+            train=False,
+            transform=transform,
+            download=download,
+        )
+        images = [dataset[i][0].unsqueeze(0) for i in range(num_samples)]
+        labels = [CIFAR_CLASSES[dataset[i][1]] for i in range(num_samples)]
+        return images, labels
+    except RuntimeError as err:
+        if download:
+            raise
+        print(f"torchvision CIFAR-10 unavailable: {err}")
+        print("Trying HuggingFace CIFAR-10 cache instead...")
+
+    from datasets import load_dataset
+
+    dataset = load_dataset("cifar10", split="test")
+    images = [transform(dataset[i]["img"]).unsqueeze(0) for i in range(num_samples)]
+    labels = [CIFAR_CLASSES[dataset[i]["label"]] for i in range(num_samples)]
+    return images, labels
+
+def _parse_args():
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Run DINO interpretability from a saved checkpoint without training."
+    )
+    parser.add_argument("--checkpoint", default="dino_v1.pt")
+    parser.add_argument("--version", default=None, choices=["v1", "v2", "v3"])
+    parser.add_argument("--img-size", type=int, default=64)
+    parser.add_argument("--patch-size", type=int, default=8)
+    parser.add_argument("--num-samples", type=int, default=6)
+    parser.add_argument("--data-root", default="cifar10_data")
+    parser.add_argument("--download-data", action="store_true")
+    parser.add_argument("--device", default=None)
+    parser.add_argument("--dashboard", default=None)
+    parser.add_argument("--batch", default=None)
+    parser.add_argument("--values", default=None)
+    return parser.parse_args()
+
+def main():
+    args = _parse_args()
+    device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+
+    student, version = _load_student_from_checkpoint(
+        args.checkpoint, args.version, device, args.img_size
+    )
+    images, labels = _load_cifar_samples(
+        args.data_root, args.img_size, args.num_samples, args.download_data
+    )
+
+    interp = DINOInterpreter(
+        student,
+        device=device,
+        version=version,
+        img_size=args.img_size,
+        patch_size=args.patch_size,
+    )
+
+    dashboard_path = args.dashboard or f"explain_dashboard_{version}.png"
+    batch_path = args.batch or f"batch_explain_{version}.png"
+    values_path = args.values or f"interpretability_values_{version}.npz"
+
+    maps = interp.explain(images[0], label=labels[0], save=dashboard_path)
+    interp.explain_batch(images, labels, save=batch_path)
+    np.savez(values_path, **maps)
+
+    print(f"saved {values_path}")
+    print("Interpretability complete; no training was run.")
+
+if __name__ == "__main__":
+    main()

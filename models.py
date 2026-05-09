@@ -167,10 +167,10 @@ class ProjectionHead(nn.Module):
             self.proj = nn.Linear(in_dim, out_dim)
 
         # L2 normalize output (critical for DINO)
-        self.last_layer = nn.utils.weight_norm(
-            nn.Linear(out_dim, out_dim, bias=False)
+        self.last_layer = nn.Linear(
+            out_dim, out_dim, bias=False
         )
-        self.last_layer.weight_g.data.fill_(1)
+        nn.utils.parametrizations.weight_norm(self.last_layer, name="weight")
 
     def forward(self, x):
         x = self.proj(x)

@@ -10,23 +10,51 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
 import torchvision.transforms as T
+# pyrefly: ignore [missing-import]
+from datasets import load_dataset
 
 from augmentations import DINOAugmentations
+from interpret import DINOInterpreter
 from trainer import train_dino
 from evaluate import run_eval
 from visualize import plot_pca, plot_tsne, plot_loss
 
 # Global configs:
-
-VERSION  = 'v1'
+VERSION  = 'v3'
 DEVICE   = "cuda" if torch.cuda.is_available() else "cpu"
 IMG_SIZE = 64
 BATCH    = 16   # effective = BATCH * accum_steps (4) = 64
-EPOCHS   = 50
-LR       = 1e-3
-N_SUBSET = 2000 # how many Cifar images to use 
+EPOCHS   = 100
+LR       = 1e-4
+N_SUBSET = 10000 # how many Cifar images to use 
 
 print(f"Training DINO {VERSION} | Device : {DEVICE} | Subset : {N_SUBSET}")
+
+
+CIFAR_CLASSES = [
+    "airplane", "automobile", "bird", "cat", "deer",
+    "dog", "frog", "horse", "ship", "truck",
+]
+
+class HF_CIFAR10(torch.utils.data.Dataset):
+    """
+    Wraps a HuggingFace CIFAR-10 split into a PyTorch Dataset.
+    Returns (PIL image, int label) — compatible with torchvision transforms.
+    """
+    def __init__(self, hf_split, transform=None):
+        self.ds = hf_split
+        self.transform = transform
+        self.classes = CIFAR_CLASSES
+    def __len__(self):
+        return len(self.ds)
+    def __getitem__(self, idx):
+        item  = self.ds[idx]
+        img   = item["img"]       # PIL Image (HF provides this directly)
+        label = item["label"]     # int 0–9
+        if self.transform:
+            img = self.transform(img)
+        return img, label
+
 
 # Dataset
 aug = DINOAugmentations(
@@ -67,15 +95,15 @@ def collate_views(batch):
     stacked = [torch.stack([v[i] for v in views_list]) for i in range(n_views)]
     return stacked, torch.tensor(labels)
 
+
+# Download via HFHub
+hf_train = load_dataset("cifar10", split="train")
+hf_test  = load_dataset("cifar10", split="test")
+
 # Download CIFAR-10 (auto-download) Mode
-raw_train = CIFAR10(root     = "./cifar10_data",
-                    train    = True,
-                    download = True)
+raw_train = HF_CIFAR10(hf_train)
 
-raw_test  = CIFAR10(root    = "./cifar10_data",
-                    train   = False,
-                    download = True)
-
+raw_test  = HF_CIFAR10(hf_test)
 CLASS_NAME = raw_train.classes
 
 # Random subset 
@@ -84,6 +112,7 @@ train_indices = torch.randperm(len(raw_train))[:N_SUBSET].tolist()
 train_subset  = Subset(raw_train, train_indices)
 
 # Training Loader (multi-view augmentation)
+aug     = DINOAugmentations(image_size=IMG_SIZE, n_local=1)
 train_ds = MultiViewCIFAR(train_subset, aug)
 train_loader = DataLoader(train_ds,
                          batch_size   = BATCH,
@@ -100,27 +129,20 @@ eval_transform = T.Compose([
     T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
 ])
 
-eval_train_ds = CIFAR10(root      = './cifar10_data', 
-                        train     = True, 
-                        download  = True, 
-                        transform = eval_transform)
-
-eval_test_ds  = CIFAR10(root      = './cifar10_data',
-                        train     = False,
-                        download  = False,
-                        transform = eval_transform)
+eval_train_ds = HF_CIFAR10(hf_train, transform = eval_transform)
+eval_test_ds  = HF_CIFAR10(hf_test, transform = eval_transform)
 
 eval_train_loader = DataLoader(
     Subset(eval_train_ds, train_indices),
-    batch_size=64, num_workers=2,
+    batch_size=64, num_workers=0,
 )
+
 eval_test_loader = DataLoader(
     eval_test_ds,
-    batch_size=64, num_workers=2,
+    batch_size=64, num_workers=0,
 )
 
 # Train DINO
-
 student, teacher, history = train_dino(
     version    = VERSION,
     dataloader = train_loader,
@@ -138,12 +160,47 @@ train_feats, test_feats, train_labels, test_labels = run_eval(
 # Visualize
 plot_pca(
     test_feats, test_labels,
-    CLASS_NAME, title=f"PCA {VERSION} ({N_SUBSET} imgs)"
+    CLASS_NAME,
+    title=f"PCA {VERSION} ({N_SUBSET} imgs)",
+    save=f"pca_embeddings_{VERSION}.png",
 )
 
 plot_tsne(test_feats, test_labels, CLASS_NAME,
-          title=f"t-SNE — DINO {VERSION} ({N_SUBSET} imgs)")
+          title=f"t-SNE - DINO {VERSION} ({N_SUBSET} imgs)",
+          save=f"tsne_embeddings_{VERSION}.png")
 
 plot_loss({VERSION: history})
 
 # Interpretabilty
+interp = DINOInterpreter(
+    student, device = DEVICE,
+    version = VERSION, img_size=IMG_SIZE, patch_size=8,
+)
+
+# Grab sample test images
+sample_imgs   = [eval_test_ds[i][0].unsqueeze(0) for i in range(6)]
+sample_labels = [CIFAR_CLASSES[eval_test_ds[i][1]] for i in range(6)]
+
+# single-image dashboard
+interp.explain(
+    sample_imgs[0],
+    label=sample_labels[0],
+    save=f"explain_dashboard_{VERSION}.png",
+)
+
+# Batch explaination grid
+interp.explain_batch(
+    sample_imgs,
+    sample_labels,
+    save=f"batch_explain_{VERSION}.png",
+)
+
+if VERSION == "v3":
+    interp.tracking_attention(
+        sample_imgs[0],
+        heads_to_show=(0, 1, 2),
+        save=f"attn_tracking_{VERSION}.png",
+    )
+    interp.entropy_analysis(sample_imgs[0], save=f"entropy_heatmap_{VERSION}.png")
+
+print("PNGs saved in directory")

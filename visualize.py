@@ -15,7 +15,7 @@ from sklearn.manifold import TSNE
 import torch
 import torch.nn.functional as F
 
-def plot_pca(feats, labels, class_name=None, title="PCA Embeddings"):
+def plot_pca(feats, labels, class_name=None, title="PCA Embeddings", save="pca_embedding.png"):
     pca  = PCA(n_components=2)
     proj = pca.fit_transform(feats)
 
@@ -31,12 +31,15 @@ def plot_pca(feats, labels, class_name=None, title="PCA Embeddings"):
     ax.set_title(title, fontsize=14)
     ax.legend(fontsize=9, markerscale=2)
     plt.tight_layout()
-    plt.savefig("pca_embedding.png", dpi=150) 
+    plt.savefig(save, dpi=150)
     plt.show()
-    print('saved: pca_embedding.png')
+    print(f"saved: {save}")
 
-def plot_tsne(feats, labels, class_name=None, title="TSNE Embeddings"):
-    tsne = TSNE(n_components=2, perplexity=30, n_iter=1000, random_state=42)
+def plot_tsne(feats, labels, class_name=None, title="TSNE Embeddings", save="tsne_embedding.png"):
+    try:
+        tsne = TSNE(n_components=2, perplexity=30, max_iter=1000, random_state=42)
+    except TypeError:
+        tsne = TSNE(n_components=2, perplexity=30, n_iter=1000, random_state=42)
     proj = tsne.fit_transform(feats)
 
     fig, ax = plt.subplots(figsize=(9,7))
@@ -51,9 +54,9 @@ def plot_tsne(feats, labels, class_name=None, title="TSNE Embeddings"):
     ax.set_title(title, fontsize=14)
     ax.legend(fontsize=9, markerscale=2)
     plt.tight_layout()
-    plt.savefig("tsne_embedding.png", dpi=150) 
+    plt.savefig(save, dpi=150)
     plt.show()
-    print('saved: tsne_embedding.png')
+    print(f"saved: {save}")
 
 # Attention Map visualization for  v3 ViT
 @torch.no_grad()
